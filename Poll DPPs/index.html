@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>เช็กชื่อ</title>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <header>
+    <span id="chip" class="chip">กำลังโหลด</span>
+    <h1 id="title">กำลังโหลด…</h1>
+    <p id="desc" class="mute"></p>
+    <p id="count" class="mute"></p>
+  </header>
+  <section id="mine" class="mine" hidden></section>
+  <nav class="tabs">
+    <button data-tab="names" aria-pressed="true">เลือกชื่อ</button>
+    <button data-tab="rank" aria-pressed="false">ลำดับ</button>
+  </nav>
+  <div id="namesTab">
+    <input id="q" type="search" placeholder="ค้นหาชื่อ" aria-label="ค้นหาชื่อ">
+    <ul id="names" class="list"></ul>
+  </div>
+  <div id="rankTab" hidden><ol id="rank" class="list"></ol></div>
+</main>
+<dialog id="dlg">
+  <p>ยืนยันเลือกชื่อ</p>
+  <p><strong id="dname"></strong></p>
+  <p class="mute">เลือกแล้วเปลี่ยนเองไม่ได้ ต้องให้ผู้ดูแลปลดล็อกให้</p>
+  <div class="row"><button id="no" class="ghost">ยกเลิก</button><button id="yes">ยืนยัน</button></div>
+</dialog>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+let round = null, list = [], pending = null;
+const deviceId = (() => { try { let d = localStorage.getItem('deviceId'); if (!d) { d = crypto.randomUUID(); localStorage.setItem('deviceId', d); } return d; } catch { return crypto.randomUUID(); } })();
+const mineKey = () => 'mine:' + round.id;
+const myId = () => { try { return localStorage.getItem(mineKey()); } catch { return null; } };
+const mine = () => { const id = myId(); return list.find(p => p.id === id && p.sequence != null) || null; };
+const STATUS = {open:'เปิดรับ', closed:'ปิดรับ', draft:'ร่าง'};
+
+async function loadRound() {
+  let q = sb.from('rounds').select('*');
+  q = params.get('r') ? q.eq('id', params.get('r')) : q.order('created_at', {ascending:false}).limit(1);
+  const {data} = await q;
+  round = data && data[0] || null;
+}
+async function loadList() {
+  const {data, error} = await sb.from('participants').select('id,name,sequence,claimed_at').eq('round_id', round.id);
+  if (error) return toast('โหลดรายชื่อไม่สำเร็จ ลองรีเฟรชหน้า', true);
+  list = data.sort(byName);
+  paint();
+}
+function paint() {
+  const taken = list.filter(p => p.sequence != null).length;
+  const open = round.status === 'open';
+  const full = taken >= round.capacity;
+  const me = mine();
+  const chip = $('#chip');
+  chip.textContent = full && open ? 'เต็มแล้ว' : STATUS[round.status];
+  chip.className = 'chip ' + (full ? 'closed' : round.status);
+  $('#title').textContent = round.title;
+  $('#desc').textContent = round.description || '';
+  $('#count').textContent = `ยืนยันแล้ว ${taken} จาก ${round.capacity} สิทธิ์`;
+  const box = $('#mine');
+  box.hidden = !me;
+  if (me) box.innerHTML = `<div class="mute">ลำดับของคุณ</div><div class="big">${me.sequence}</div><div>${esc(me.name)}</div><div class="mute">กดเมื่อ ${fmtTime(me.claimed_at)} น.</div>`;
+  const kw = $('#q').value.trim().toLowerCase();
+  const rows = list.filter(p => p.name.toLowerCase().includes(kw));
+  $('#names').innerHTML = rows.length ? rows.map(p => {
+    if (me && p.id === me.id) return `<li class="me"><span>${esc(p.name)}</span><span class="seq">ลำดับ ${p.sequence}</span></li>`;
+    if (p.sequence != null) return `<li class="taken"><span>${esc(p.name)}</span><span>เลือกแล้ว</span></li>`;
+    const off = !open || full || me;
+    return `<li><span>${esc(p.name)}</span><button data-id="${esc(p.id)}" ${off ? 'disabled' : ''}>เลือกชื่อนี้</button></li>`;
+  }).join('') : '<li class="empty">ไม่พบชื่อที่ค้นหา</li>';
+  const ranked = list.filter(p => p.sequence != null).sort((a, b) => a.sequence - b.sequence);
+  $('#rank').innerHTML = ranked.length ? ranked.map(p =>
+    `<li class="${me && p.id === me.id ? 'me' : ''}"><span><span class="seq">${p.sequence}</span> &nbsp;${esc(p.name)}</span><span class="mute">${fmtTime(p.claimed_at)}</span></li>`).join('')
+    : '<li class="empty">ยังไม่มีผู้ยืนยัน</li>';
+}
+async function claim() {
+  const yes = $('#yes'); yes.disabled = true;
+  const {data, error} = await sb.rpc('claim_participant', {p_participant_id: pending, p_device_id: deviceId});
+  yes.disabled = false; $('#dlg').close();
+  if (error) return toast('เชื่อมต่อไม่สำเร็จ ลองอีกครั้ง', true);
+  if (data.ok) {
+    try { localStorage.setItem(mineKey(), pending); } catch {}
+    toast('ยืนยันแล้ว ลำดับที่ ' + data.sequence);
+  } else {
+    toast(data.message, true);
+    if (data.code === 'USER_ALREADY_CLAIMED') {
+      await loadList();
+      const p = list.find(x => x.sequence === data.sequence);
+      if (p) try { localStorage.setItem(mineKey(), p.id); } catch {}
+    }
+  }
+  await loadList();
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.tab) {
+    document.querySelectorAll('.tabs button').forEach(x => x.setAttribute('aria-pressed', x === b));
+    $('#namesTab').hidden = b.dataset.tab !== 'names'; $('#rankTab').hidden = b.dataset.tab !== 'rank';
+  } else if (b.dataset.id) {
+    pending = b.dataset.id; $('#dname').textContent = list.find(p => p.id === pending).name; $('#dlg').showModal();
+  } else if (b.id === 'no') $('#dlg').close();
+  else if (b.id === 'yes') claim();
+});
+$('#q').addEventListener('input', () => round && paint());
+(async () => {
+  await loadRound();
+  if (!round) { $('#chip').hidden = true; $('#title').textContent = 'ไม่พบรอบที่เปิดอยู่'; $('#desc').textContent = 'ตรวจสอบลิงก์จากผู้ดูแลอีกครั้ง'; return; }
+  await loadList();
+  const refresh = debounce(loadList, 300);
+  sb.channel('r-' + round.id)
+    .on('postgres_changes', {event:'*', schema:'public', table:'participants', filter:'round_id=eq.' + round.id}, refresh)
+    .on('postgres_changes', {event:'UPDATE', schema:'public', table:'rounds', filter:'id=eq.' + round.id}, p => { round = p.new; paint(); })
+    .subscribe();
+  setInterval(loadList, 10000); // สำรองกรณี Realtime หลุด
+})();
+</script>
+</body>
+</html>

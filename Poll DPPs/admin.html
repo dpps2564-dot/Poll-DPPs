@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ผู้ดูแล – เช็กชื่อ</title>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="wide">
+  <section id="login" hidden style="max-width:380px;margin:60px auto">
+    <h1>เข้าสู่ระบบผู้ดูแล</h1>
+    <form id="loginForm">
+      <label for="em">อีเมล</label><input id="em" type="email" required autocomplete="username">
+      <label for="pw">รหัสผ่าน</label><input id="pw" type="password" required autocomplete="current-password">
+      <div class="row"><button>เข้าสู่ระบบ</button></div>
+    </form>
+  </section>
+  <section id="denied" hidden class="empty">บัญชีนี้ไม่มีสิทธิ์ผู้ดูแล <button class="ghost" id="out2">ออกจากระบบ</button></section>
+
+  <section id="app" hidden>
+    <div class="bar noprint"><h1>จัดการรอบเช็กชื่อ</h1><span class="mute"><span id="who"></span> <button class="ghost sm" id="out">ออกจากระบบ</button></span></div>
+    <div class="card noprint">
+      <div class="bar"><select id="roundSel" style="max-width:360px" aria-label="เลือกรอบ"></select><button id="newBtn" class="ghost">สร้างรอบใหม่</button></div>
+      <form id="newForm" hidden>
+        <label for="nt">ชื่อรอบ</label><input id="nt" required>
+        <label for="nd">คำอธิบาย (ไม่บังคับ)</label><input id="nd">
+        <label for="nc">จำนวนสิทธิ์</label><input id="nc" type="number" min="1" value="50" required>
+        <label for="nn">รายชื่อ (บรรทัดละ 1 คน)</label><textarea id="nn" rows="6" required></textarea>
+        <div class="row"><button>สร้างรอบ (สถานะร่าง)</button></div>
+      </form>
+    </div>
+
+    <div id="roundPanel" hidden>
+      <div class="card">
+        <div class="bar"><h2 id="rTitle" style="margin:0"></h2>
+          <label class="noprint" style="margin:0">สถานะ
+            <select id="status" style="width:auto"><option value="draft">ร่าง (ผู้ใช้ยังไม่เห็น)</option><option value="open">เปิดรับ</option><option value="closed">ปิดรับ</option></select></label></div>
+        <div class="stats" style="margin-top:10px"><div><b id="sTotal"></b>รายชื่อทั้งหมด</div><div><b id="sDone"></b>ยืนยันแล้ว</div><div><b id="sLeft"></b>สิทธิ์คงเหลือ</div></div>
+        <div class="noprint"><label for="link">ลิงก์สำหรับส่งในกลุ่ม LINE</label>
+          <div class="bar" style="flex-wrap:nowrap"><input id="link" readonly><button id="copy">คัดลอก</button></div></div>
+      </div>
+      <div class="bar noprint"><h2>ลำดับและรายชื่อ</h2><span><button class="ghost sm" id="csv">ดาวน์โหลด CSV (Excel)</button> <button class="ghost sm" id="print">พิมพ์ / PDF</button></span></div>
+      <div class="scroll"><table><thead><tr><th>ลำดับ</th><th>ชื่อ</th><th>เวลา (ไทย)</th><th class="noprint"></th></tr></thead><tbody id="rows"></tbody></table></div>
+      <details class="card noprint"><summary>เพิ่มรายชื่อ</summary>
+        <label for="an">บรรทัดละ 1 คน</label><textarea id="an" rows="4"></textarea>
+        <div class="row"><button id="addBtn">เพิ่มรายชื่อ</button></div></details>
+      <h2 class="noprint">ประวัติการทำงาน (Audit Log)</h2>
+      <div id="logs" class="card noprint"></div>
+    </div>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+let cur = null, rounds = [], parts = [], chan = null;
+const STATUS = {open:'เปิดรับ', closed:'ปิดรับ', draft:'ร่าง'};
+const splitNames = t => t.split('\n').map(s => s.trim()).filter(Boolean);
+
+async function gate(session) {
+  $('#login').hidden = !!session; $('#app').hidden = true; $('#denied').hidden = true;
+  if (!session) return;
+  const {data: ok} = await sb.rpc('is_admin');
+  if (!ok) { $('#denied').hidden = false; return; }
+  $('#who').textContent = session.user.email; $('#app').hidden = false;
+  await loadRounds();
+}
+sb.auth.onAuthStateChange((_e, s) => setTimeout(() => gate(s), 0));
+
+$('#loginForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const {error} = await sb.auth.signInWithPassword({email: $('#em').value, password: $('#pw').value});
+  if (error) toast('อีเมลหรือรหัสผ่านไม่ถูกต้อง', true);
+});
+['#out', '#out2'].forEach(s => $(s).addEventListener('click', () => sb.auth.signOut()));
+
+async function loadRounds() {
+  const {data, error} = await sb.from('rounds').select('*').order('created_at', {ascending: false});
+  if (error) return toast('โหลดรอบไม่สำเร็จ', true);
+  rounds = data;
+  $('#roundSel').innerHTML = rounds.map(r => `<option value="${esc(r.id)}">${esc(r.title)} (${STATUS[r.status]})</option>`).join('');
+  if (!rounds.find(r => r.id === cur)) cur = rounds[0] && rounds[0].id;
+  if (cur) $('#roundSel').value = cur;
+  $('#newForm').hidden = !!cur;
+  await loadRound();
+}
+async function loadRound() {
+  $('#roundPanel').hidden = !cur;
+  if (chan) { sb.removeChannel(chan); chan = null; }
+  if (!cur) return;
+  const [p, l] = await Promise.all([
+    sb.from('participants').select('*').eq('round_id', cur),
+    sb.from('audit_logs').select('*').eq('round_id', cur).order('created_at', {ascending: false}).limit(100)
+  ]);
+  if (p.error) return toast('โหลดรายชื่อไม่สำเร็จ', true);
+  parts = p.data; paint(l.data || []);
+  const refresh = debounce(loadRound, 400);
+  chan = sb.channel('admin-' + cur).on('postgres_changes', {event:'*', schema:'public', table:'participants', filter:'round_id=eq.' + cur}, refresh).subscribe();
+}
+function ordered() {
+  return [...parts].sort((a, b) => (a.sequence ?? 1e9) - (b.sequence ?? 1e9) || byName(a, b));
+}
+function paint(logs) {
+  const r = rounds.find(x => x.id === cur);
+  const done = parts.filter(p => p.sequence != null).length;
+  $('#rTitle').textContent = r.title; $('#status').value = r.status;
+  $('#sTotal').textContent = parts.length; $('#sDone').textContent = done; $('#sLeft').textContent = Math.max(r.capacity - done, 0);
+  $('#link').value = location.origin + '/?r=' + r.id;
+  $('#rows').innerHTML = ordered().map(p => `<tr><td>${p.sequence ?? '–'}</td><td>${esc(p.name)}</td><td>${fmtTime(p.claimed_at)}</td><td class="noprint">${
+    p.sequence != null ? `<button class="sm ghost" data-act="unlock" data-id="${esc(p.id)}">ปลดล็อก</button>` : `<button class="sm danger" data-act="del" data-id="${esc(p.id)}">ลบ</button>`}</td></tr>`).join('');
+  $('#logs').innerHTML = logs.length ? logs.map(l => `<div class="log"><span class="mute">${fmtDT(l.created_at)}</span> <b>${esc(l.actor)}</b> · ${esc(l.action)}<br>${esc(l.details)}</div>`).join('') : '<span class="mute">ยังไม่มีประวัติ</span>';
+}
+
+$('#roundSel').addEventListener('change', e => { cur = e.target.value; loadRound(); });
+$('#newBtn').addEventListener('click', () => { $('#newForm').hidden = !$('#newForm').hidden; });
+$('#newForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const names = splitNames($('#nn').value);
+  const {data: r, error} = await sb.from('rounds').insert({title: $('#nt').value.trim(), description: $('#nd').value.trim() || null, capacity: +$('#nc').value}).select().single();
+  if (error) return toast('สร้างรอบไม่สำเร็จ', true);
+  const {error: e2} = await sb.from('participants').insert(names.map(name => ({round_id: r.id, name})));
+  if (e2) toast('สร้างรอบแล้ว แต่เพิ่มรายชื่อไม่สำเร็จ', true); else toast('สร้างรอบแล้ว เปลี่ยนสถานะเป็น "เปิดรับ" เมื่อพร้อม');
+  e.target.reset(); cur = r.id; await loadRounds();
+});
+$('#status').addEventListener('change', async e => {
+  const {error} = await sb.from('rounds').update({status: e.target.value}).eq('id', cur);
+  if (error) toast('เปลี่ยนสถานะไม่สำเร็จ', true); else toast('เปลี่ยนสถานะเป็น ' + STATUS[e.target.value]);
+  await loadRounds();
+});
+$('#addBtn').addEventListener('click', async () => {
+  const names = splitNames($('#an').value); if (!names.length) return;
+  const {error} = await sb.from('participants').insert(names.map(name => ({round_id: cur, name})));
+  if (error) return toast('เพิ่มรายชื่อไม่สำเร็จ', true);
+  $('#an').value = ''; toast(`เพิ่ม ${names.length} รายชื่อ`); loadRound();
+});
+$('#rows').addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const p = parts.find(x => x.id === b.dataset.id);
+  if (b.dataset.act === 'unlock') {
+    const reason = prompt(`เหตุผลที่ปลดล็อก "${p.name}" (ลำดับ ${p.sequence})`);
+    if (!reason || !reason.trim()) return;
+    const {data, error} = await sb.rpc('admin_unlock_participant', {p_participant_id: p.id, p_reason: reason});
+    if (error || !data.ok) return toast(data ? data.message : 'ปลดล็อกไม่สำเร็จ', true);
+    toast('ปลดล็อกแล้ว');
+  } else if (b.dataset.act === 'del') {
+    if (!confirm(`ลบชื่อ "${p.name}" ?`)) return;
+    const {error} = await sb.from('participants').delete().eq('id', p.id);
+    if (error) return toast('ลบไม่สำเร็จ', true);
+  }
+  loadRound();
+});
+$('#copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('#link').value); toast('คัดลอกลิงก์แล้ว'); } catch { $('#link').select(); toast('เลือกข้อความแล้ว กดคัดลอกเอง', true); }
+});
+$('#print').addEventListener('click', () => print());
+$('#csv').addEventListener('click', () => {
+  const cell = v => { v = String(v ?? ''); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return '"' + v.replace(/"/g, '""') + '"'; };
+  const rows = [['ลำดับ', 'ชื่อ', 'วันที่', 'เวลา (ไทย)', 'สถานะ']].concat(ordered().map(p =>
+    [p.sequence ?? '', p.name, fmtDate(p.claimed_at), p.claimed_at ? fmtTime(p.claimed_at) : '', p.sequence != null ? 'ยืนยันแล้ว' : 'ยังไม่ยืนยัน']));
+  const blob = new Blob(['\uFEFF' + rows.map(r => r.map(cell).join(',')).join('\n')], {type: 'text/csv;charset=utf-8'});
+  const a = Object.assign(document.createElement('a'), {href: URL.createObjectURL(blob), download: 'checkin-' + new Date().toISOString().slice(0, 10) + '.csv'});
+  document.body.append(a); a.click(); a.remove();
+});
+</script>
+</body>
+</html>
