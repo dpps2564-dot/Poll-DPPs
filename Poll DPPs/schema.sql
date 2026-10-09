@@ -237,4 +237,4 @@ alter publication supabase_realtime add table public.rounds;
 -- 1. Authentication → Users → Add user (อีเมล + รหัสผ่านของแอดมิน)
 -- 2. แล้วรันคำสั่งนี้ (แก้อีเมลให้ตรง):
 --    insert into public.admin_users (user_id)
---    select id from auth.users where email = 'admin@example.com';
+--    select id from auth.users where email = 'admin@dpps.local';
